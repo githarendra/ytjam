@@ -1,0 +1,15 @@
+# Single-service deploy: this one Node process serves the API, the Socket.io
+# sync layer, AND the built React app. Simpler than two services, and less
+# likely to trip any host's free-tier verification flow than a Blueprint with
+# multiple services would.
+services:
+  - type: web
+    name: ytjam
+    runtime: node
+    rootDir: server
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: YOUTUBE_API_KEY
+        sync: false # optional — enables in-app search; leave blank to allow paste-only
