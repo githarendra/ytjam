@@ -53,7 +53,16 @@ function projectedPosition(playback, clockOffsetMs) {
  * The exposed `unmute()` handle is meant to be called from a real click.
  */
 const Player = forwardRef(function Player(
-  { playback, suspendSync, onTimeUpdate, onUserControl, onAutoplayBlocked },
+  {
+    playback,
+    suspendSync,
+    onTimeUpdate,
+    onUserControl,
+    onAutoplayBlocked,
+    onSkip,
+    nowPlayingMeta, // { title, thumbnail } — drives the Media Session card, not the iframe itself
+    onBackgroundReturn, // fired when the tab regains visibility after being hidden while playing
+  },
   ref
 ) {
   const containerRef = useRef(null);
@@ -65,6 +74,11 @@ const Player = forwardRef(function Player(
   const sampleRef = useRef({ value: 0, duration: 0, at: performance.now() });
   const onUserControlRef = useRef(onUserControl);
   const onAutoplayBlockedRef = useRef(onAutoplayBlocked);
+  const onSkipRef = useRef(onSkip);
+  const onBackgroundReturnRef = useRef(onBackgroundReturn);
+  const wasHiddenWhilePlayingRef = useRef(false);
+  onSkipRef.current = onSkip;
+  onBackgroundReturnRef.current = onBackgroundReturn;
   const suppressUntilRef = useRef(0); // ignore state-change echoes caused by our own reconcile() calls
   const clockOffsetRef = useRef(0); // ms to add to Date.now() to approximate the server's clock
   const lastSeekAtRef = useRef(0); // throttles corrective seeks so they have time to settle
@@ -80,6 +94,14 @@ const Player = forwardRef(function Player(
       player.unMute?.();
       player.setVolume?.(100);
       onAutoplayBlockedRef.current?.(false);
+    },
+    // Called from a direct tap on the "resume in sync" prompt. Being a real
+    // click handler gives this the best shot at an unmuted resume; if the
+    // browser still refuses (gesture didn't count as "on" the iframe itself),
+    // reconcile()'s existing verifyPlaybackStarted() falls back to muted +
+    // the usual unmute banner, same as any other autoplay block.
+    resumeAfterBackground() {
+      reconcile(playbackRef.current);
     },
   }));
 
@@ -155,6 +177,66 @@ const Player = forwardRef(function Player(
 
     setTimeout(() => check(0), delays[0]);
   }
+
+  // Media Session integration is deliberately app-level, not iframe-level:
+  // the YouTube embed's actual <video> element lives in a cross-origin
+  // iframe we have no access to, so there's no way to hand the OS a real
+  // media element to keep alive in the background. What we CAN do is
+  // register our own session so the OS's lock-screen/notification media
+  // card shows correct title/art and routes hardware play/pause/skip keys
+  // back into the same socket-driven controls everyone else in the room
+  // uses. This does not enable background audio — it only improves the
+  // experience while the tab is actually foregrounded (e.g. screen merely
+  // dimmed, not locked).
+  useEffect(() => {
+    if (!("mediaSession" in navigator)) return;
+    navigator.mediaSession.setActionHandler("play", () => onUserControlRef.current?.("play"));
+    navigator.mediaSession.setActionHandler("pause", () => onUserControlRef.current?.("pause"));
+    navigator.mediaSession.setActionHandler("nexttrack", () => onSkipRef.current?.());
+    return () => {
+      navigator.mediaSession.setActionHandler("play", null);
+      navigator.mediaSession.setActionHandler("pause", null);
+      navigator.mediaSession.setActionHandler("nexttrack", null);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!("mediaSession" in navigator)) return;
+    if (nowPlayingMeta?.title) {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: nowPlayingMeta.title,
+        artist: "ytjam",
+        artwork: nowPlayingMeta.thumbnail ? [{ src: nowPlayingMeta.thumbnail, sizes: "480x360", type: "image/jpeg" }] : [],
+      });
+    }
+    navigator.mediaSession.playbackState = playback.isPlaying ? "playing" : "paused";
+  }, [nowPlayingMeta?.title, nowPlayingMeta?.thumbnail, playback.isPlaying]);
+
+  // The iframe's video pauses whenever the tab is backgrounded or the
+  // screen locks — that's Android/iOS restricting cross-origin iframe
+  // media, not something we can override from JS. What we can control is
+  // what happens on the way back: instead of silently letting the 3s
+  // reconcile loop eventually notice and fight autoplay restrictions, we
+  // react to visibility immediately and let the parent show a clear
+  // "paused while you were away — tap to resume in sync" prompt.
+  useEffect(() => {
+    function handleVisibility() {
+      if (document.hidden) {
+        wasHiddenWhilePlayingRef.current = playbackRef.current.isPlaying;
+        return;
+      }
+      if (wasHiddenWhilePlayingRef.current) {
+        wasHiddenWhilePlayingRef.current = false;
+        const player = playerRef.current;
+        const state = player?.getPlayerState?.();
+        if (playbackRef.current.isPlaying && state !== YT_PLAYING) {
+          onBackgroundReturnRef.current?.();
+        }
+      }
+    }
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;

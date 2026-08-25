@@ -37,6 +37,13 @@ export default function Room({ initialRoom, name, onLeave }) {
   const playerRef = useRef(null);
   const [needsUnmute, setNeedsUnmute] = useState(false);
 
+  // Backgrounding the tab / locking the screen pauses the YouTube iframe —
+  // that's an Android/iOS restriction on cross-origin iframe media, not
+  // something fixable from here. This just makes the return trip clean:
+  // when Player detects it came back paused, show a prompt instead of
+  // leaving the person staring at a silently-stalled video.
+  const [needsBackgroundResume, setNeedsBackgroundResume] = useState(false);
+
   // Brief visual pulse whenever the room's playback state changes — a shared
   // "just synced" moment for play/pause/seek/skip, whoever triggered it.
   const [justSynced, setJustSynced] = useState(false);
@@ -238,11 +245,26 @@ export default function Room({ initialRoom, name, onLeave }) {
             onTimeUpdate={(current, duration) => setLiveTime({ current, duration })}
             onUserControl={handleNativeControl}
             onAutoplayBlocked={setNeedsUnmute}
+            onSkip={skip}
+            nowPlayingMeta={nowPlaying ? { title: nowPlaying.title, thumbnail: nowPlaying.thumbnail } : null}
+            onBackgroundReturn={() => setNeedsBackgroundResume(true)}
           />
         ) : (
           <div className="player-video" style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
             <span className="np-empty">Add a track below to start the jam.</span>
           </div>
+        )}
+
+        {needsBackgroundResume && (
+          <button
+            className="unmute-banner"
+            onClick={() => {
+              playerRef.current?.resumeAfterBackground();
+              setNeedsBackgroundResume(false);
+            }}
+          >
+            ⏸ Paused while you were away — tap to rejoin in sync
+          </button>
         )}
 
         {needsUnmute && (
